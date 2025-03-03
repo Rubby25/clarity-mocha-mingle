@@ -2,6 +2,8 @@
 (define-constant ERR-NOT-FOUND (err u100))
 (define-constant ERR-UNAUTHORIZED (err u101))
 (define-constant ERR-INVALID-RATING (err u102))
+(define-constant ERR-ALREADY-RATED (err u103))
+(define-constant ERR-INVALID-STATUS (err u104))
 
 ;; Data variables
 (define-data-var next-recipe-id uint u1)
@@ -16,7 +18,10 @@
     author: principal,
     difficulty: uint,
     total-ratings: uint,
-    rating-count: uint
+    rating-count: uint,
+    status: (string-ascii 20),
+    created-at: uint,
+    updated-at: uint
   }
 )
 
@@ -25,13 +30,14 @@
   {
     recipe-id: uint,
     author: principal,
-    content: (string-ascii 500)
+    content: (string-ascii 500),
+    created-at: uint
   }
 )
 
 (define-map UserRecipeRatings
   { user: principal, recipe-id: uint }
-  uint
+  { rating: uint, last-updated: uint }
 )
 
 ;; Public functions
@@ -43,10 +49,37 @@
       author: tx-sender,
       difficulty: difficulty,
       total-ratings: u0,
-      rating-count: u0
+      rating-count: u0,
+      status: "active",
+      created-at: block-height,
+      updated-at: block-height
     })
     (var-set next-recipe-id (+ recipe-id u1))
     (ok recipe-id)
+  )
+)
+
+(define-public (update-recipe (recipe-id uint) (title (string-ascii 100)) (content (string-ascii 1000)) (difficulty uint))
+  (let ((recipe (unwrap! (map-get? Recipes recipe-id) ERR-NOT-FOUND)))
+    (asserts! (is-eq tx-sender (get author recipe)) ERR-UNAUTHORIZED)
+    (map-set Recipes recipe-id (merge recipe {
+      title: title,
+      content: content,
+      difficulty: difficulty,
+      updated-at: block-height
+    }))
+    (ok true)
+  )
+)
+
+(define-public (delete-recipe (recipe-id uint))
+  (let ((recipe (unwrap! (map-get? Recipes recipe-id) ERR-NOT-FOUND)))
+    (asserts! (is-eq tx-sender (get author recipe)) ERR-UNAUTHORIZED)
+    (map-set Recipes recipe-id (merge recipe {
+      status: "deleted",
+      updated-at: block-height
+    }))
+    (ok true)
   )
 )
 
@@ -54,13 +87,21 @@
   (let (
     (recipe (unwrap! (map-get? Recipes recipe-id) ERR-NOT-FOUND))
     (key { user: tx-sender, recipe-id: recipe-id })
+    (existing-rating (map-get? UserRecipeRatings key))
   )
     (asserts! (and (>= rating u1) (<= rating u5)) ERR-INVALID-RATING)
-    (map-set Recipes recipe-id (merge recipe {
-      total-ratings: (+ (get total-ratings recipe) rating),
-      rating-count: (+ (get rating-count recipe) u1)
-    }))
-    (map-set UserRecipeRatings key rating)
+    (if (is-some existing-rating)
+      (let ((old-rating (get rating (unwrap-panic existing-rating))))
+        (map-set Recipes recipe-id (merge recipe {
+          total-ratings: (+ (- (get total-ratings recipe) old-rating) rating)
+        }))
+      )
+      (map-set Recipes recipe-id (merge recipe {
+        total-ratings: (+ (get total-ratings recipe) rating),
+        rating-count: (+ (get rating-count recipe) u1)
+      }))
+    )
+    (map-set UserRecipeRatings key { rating: rating, last-updated: block-height })
     (ok true)
   )
 )
@@ -71,7 +112,8 @@
     (map-set Comments comment-id {
       recipe-id: recipe-id,
       author: tx-sender,
-      content: content
+      content: content,
+      created-at: block-height
     })
     (var-set next-comment-id (+ comment-id u1))
     (ok comment-id)
@@ -88,5 +130,13 @@
 )
 
 (define-read-only (get-rating (user principal) (recipe-id uint))
-  (ok (unwrap! (map-get? UserRecipeRatings { user: user, recipe-id: recipe-id }) u0))
+  (ok (get rating (unwrap! (map-get? UserRecipeRatings { user: user, recipe-id: recipe-id }) { rating: u0, last-updated: u0 })))
+)
+
+(define-read-only (get-average-rating (recipe-id uint))
+  (let ((recipe (unwrap! (map-get? Recipes recipe-id) ERR-NOT-FOUND)))
+    (ok (if (is-eq (get rating-count recipe) u0)
+      u0
+      (/ (get total-ratings recipe) (get rating-count recipe))))
+  )
 )
